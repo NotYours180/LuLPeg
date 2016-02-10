@@ -28,26 +28,400 @@ end
 
 --=============================================================================
 do local _ENV = _ENV
-packages['analizer'] = function (...)
+packages['util'] = function (...)
 
-local u = require"util"
-local nop, weakkey = u.nop, u.weakkey
-local hasVcache, hasCmtcache , lengthcache
-    = weakkey{}, weakkey{},    weakkey{}
-return {
-    hasV = nop,
-    hasCmt = nop,
-    length = nop,
-    hasCapture = nop
+local getmetatable, setmetatable, load, loadstring, next
+    , pairs, pcall, print, rawget, rawset, select, tostring
+    , type, unpack
+    = getmetatable, setmetatable, load, loadstring, next
+    , pairs, pcall, print, rawget, rawset, select, tostring
+    , type, unpack
+local m, s, t = require"math", require"string", require"table"
+local m_max, s_match, s_gsub, t_concat, t_insert
+    = m.max, s.match, s.gsub, t.concat, t.insert
+local compat = require"compat"
+local
+function nop () end
+local noglobals, getglobal, setglobal if pcall and not compat.lua52 and not release then
+    local function errR (_,i)
+        error("illegal global read: " .. tostring(i), 2)
+    end
+    local function errW (_,i, v)
+        error("illegal global write: " .. tostring(i)..": "..tostring(v), 2)
+    end
+    local env = setmetatable({}, { __index=errR, __newindex=errW })
+    noglobals = function()
+        pcall(setfenv, 3, env)
+    end
+    function getglobal(k) rawget(env, k) end
+    function setglobal(k, v) rawset(env, k, v) end
+else
+    noglobals = nop
+end
+local _ENV = noglobals() ------------------------------------------------------
+local util = {
+    nop = nop,
+    noglobals = noglobals,
+    getglobal = getglobal,
+    setglobal = setglobal
 }
+util.unpack = t.unpack or unpack
+util.pack = t.pack or function(...) return { n = select('#', ...), ... } end
+if compat.lua51 then
+    local old_load = load
+   function util.load (ld, source, mode, env)
+     local fun
+     if type (ld) == 'string' then
+       fun = loadstring (ld)
+     else
+       fun = old_load (ld, source)
+     end
+     if env then
+       setfenv (fun, env)
+     end
+     return fun
+   end
+else
+    util.load = load
+end
+if compat.luajit and compat.jit then
+    function util.max (ary)
+        local max = 0
+        for i = 1, #ary do
+            max = m_max(max,ary[i])
+        end
+        return max
+    end
+elseif compat.luajit then
+    local t_unpack = util.unpack
+    function util.max (ary)
+     local len = #ary
+        if len <=30 or len > 10240 then
+            local max = 0
+            for i = 1, #ary do
+                local j = ary[i]
+                if j > max then max = j end
+            end
+            return max
+        else
+            return m_max(t_unpack(ary))
+        end
+    end
+else
+    local t_unpack = util.unpack
+    local safe_len = 1000
+    function util.max(array)
+        local len = #array
+        if len == 0 then return -1 end -- FIXME: shouldn't this be `return -1`?
+        local off = 1
+        local off_end = safe_len
+        local max = array[1] -- seed max.
+        repeat
+            if off_end > len then off_end = len end
+            local seg_max = m_max(t_unpack(array, off, off_end))
+            if seg_max > max then
+                max = seg_max
+            end
+            off = off + safe_len
+            off_end = off_end + safe_len
+        until off >= len
+        return max
+    end
+end
+local
+function setmode(t,mode)
+    local mt = getmetatable(t) or {}
+    if mt.__mode then
+        error("The mode has already been set on table "..tostring(t)..".")
+    end
+    mt.__mode = mode
+    return setmetatable(t, mt)
+end
+util.setmode = setmode
+function util.weakboth (t)
+    return setmode(t,"kv")
+end
+function util.weakkey (t)
+    return setmode(t,"k")
+end
+function util.weakval (t)
+    return setmode(t,"v")
+end
+function util.strip_mt (t)
+    return setmetatable(t, nil)
+end
+local getuniqueid
+do
+    local N, index = 0, {}
+    function getuniqueid(v)
+        if not index[v] then
+            N = N + 1
+            index[v] = N
+        end
+        return index[v]
+    end
+end
+util.getuniqueid = getuniqueid
+do
+    local counter = 0
+    function util.gensym ()
+        counter = counter + 1
+        return "___SYM_"..counter
+    end
+end
+function util.passprint (...) print(...) return ... end
+local val_to_str_, key_to_str, table_tostring, cdata_to_str, t_cache
+local multiplier = 2
+local
+function val_to_string (v, indent)
+    indent = indent or 0
+    t_cache = {} -- upvalue.
+    local acc = {}
+    val_to_str_(v, acc, indent, indent)
+    local res = t_concat(acc, "")
+    return res
+end
+util.val_to_str = val_to_string
+function val_to_str_ ( v, acc, indent, str_indent )
+    str_indent = str_indent or 1
+    if "string" == type( v ) then
+        v = s_gsub( v, "\n",  "\n" .. (" "):rep( indent * multiplier + str_indent ) )
+        if s_match( s_gsub( v,"[^'\"]",""), '^"+$' ) then
+            acc[#acc+1] = t_concat{ "'", "", v, "'" }
+        else
+            acc[#acc+1] = t_concat{'"', s_gsub(v,'"', '\\"' ), '"' }
+        end
+    elseif "cdata" == type( v ) then
+            cdata_to_str( v, acc, indent )
+    elseif "table" == type(v) then
+        if t_cache[v] then
+            acc[#acc+1] = t_cache[v]
+        else
+            t_cache[v] = tostring( v )
+            table_tostring( v, acc, indent )
+        end
+    else
+        acc[#acc+1] = tostring( v )
+    end
+end
+function key_to_str ( k, acc, indent )
+    if "string" == type( k ) and s_match( k, "^[_%a][_%a%d]*$" ) then
+        acc[#acc+1] = s_gsub( k, "\n", (" "):rep( indent * multiplier + 1 ) .. "\n" )
+    else
+        acc[#acc+1] = "[ "
+        val_to_str_( k, acc, indent )
+        acc[#acc+1] = " ]"
+    end
+end
+function cdata_to_str(v, acc, indent)
+    acc[#acc+1] = ( " " ):rep( indent * multiplier )
+    acc[#acc+1] = "["
+    print(#acc)
+    for i = 0, #v do
+        if i % 16 == 0 and i ~= 0 then
+            acc[#acc+1] = "\n"
+            acc[#acc+1] = (" "):rep(indent * multiplier + 2)
+        end
+        acc[#acc+1] = v[i] and 1 or 0
+        acc[#acc+1] = i ~= #v and  ", " or ""
+    end
+    print(#acc, acc[1], acc[2])
+    acc[#acc+1] = "]"
+end
+function table_tostring ( tbl, acc, indent )
+    acc[#acc+1] = t_cache[tbl]
+    acc[#acc+1] = "{\n"
+    for k, v in pairs( tbl ) do
+        local str_indent = 1
+        acc[#acc+1] = (" "):rep((indent + 1) * multiplier)
+        key_to_str( k, acc, indent + 1)
+        if acc[#acc] == " ]"
+        and acc[#acc - 2] == "[ "
+        then str_indent = 8 + #acc[#acc - 1]
+        end
+        acc[#acc+1] = " = "
+        val_to_str_( v, acc, indent + 1, str_indent)
+        acc[#acc+1] = "\n"
+    end
+    acc[#acc+1] = ( " " ):rep( indent * multiplier )
+    acc[#acc+1] = "}"
+end
+function util.expose(v) print(val_to_string(v)) return v end
+function util.map (ary, func, ...)
+    if type(ary) == "function" then ary, func = func, ary end
+    local res = {}
+    for i = 1,#ary do
+        res[i] = func(ary[i], ...)
+    end
+    return res
+end
+function util.selfmap (ary, func, ...)
+    if type(ary) == "function" then ary, func = func, ary end
+    for i = 1,#ary do
+        ary[i] = func(ary[i], ...)
+    end
+    return ary
+end
+local
+function map_all (tbl, func, ...)
+    if type(tbl) == "function" then tbl, func = func, tbl end
+    local res = {}
+    for k, v in next, tbl do
+        res[k]=func(v, ...)
+    end
+    return res
+end
+util.map_all = map_all
+local
+function fold (ary, func, acc)
+    local i0 = 1
+    if not acc then
+        acc = ary[1]
+        i0 = 2
+    end
+    for i = i0, #ary do
+        acc = func(acc,ary[i])
+    end
+    return acc
+end
+util.fold = fold
+local
+function foldr (ary, func, acc)
+    local offset = 0
+    if not acc then
+        acc = ary[#ary]
+        offset = 1
+    end
+    for i = #ary - offset, 1 , -1 do
+        acc = func(ary[i], acc)
+    end
+    return acc
+end
+util.foldr = foldr
+local
+function map_fold(ary, mfunc, ffunc, acc)
+    local i0 = 1
+    if not acc then
+        acc = mfunc(ary[1])
+        i0 = 2
+    end
+    for i = i0, #ary do
+        acc = ffunc(acc,mfunc(ary[i]))
+    end
+    return acc
+end
+util.map_fold = map_fold
+local
+function map_foldr(ary, mfunc, ffunc, acc)
+    local offset = 0
+    if not acc then
+        acc = mfunc(ary[#acc])
+        offset = 1
+    end
+    for i = #ary - offset, 1 , -1 do
+        acc = ffunc(mfunc(ary[i], acc))
+    end
+    return acc
+end
+util.map_foldr = map_fold
+function util.zip(a1, a2)
+    local res, len = {}, m_max(#a1,#a2)
+    for i = 1,len do
+        res[i] = {a1[i], a2[i]}
+    end
+    return res
+end
+function util.zip_all(t1, t2)
+    local res = {}
+    for k,v in pairs(t1) do
+        res[k] = {v, t2[k]}
+    end
+    for k,v in pairs(t2) do
+        if res[k] == nil then
+            res[k] = {t1[k], v}
+        end
+    end
+    return res
+end
+function util.filter(ary,func)
+    local res = {}
+    for i = 1,#ary do
+        if func(ary[i]) then
+            t_insert(res, ary[i])
+        end
+    end
+end
+local
+function id (...) return ... end
+util.id = id
+local function AND (a,b) return a and b end
+local function OR  (a,b) return a or b  end
+function util.copy (tbl) return map_all(tbl, id) end
+function util.all (ary, mfunc)
+    if mfunc then
+        return map_fold(ary, mfunc, AND)
+    else
+        return fold(ary, AND)
+    end
+end
+function util.any (ary, mfunc)
+    if mfunc then
+        return map_fold(ary, mfunc, OR)
+    else
+        return fold(ary, OR)
+    end
+end
+function util.get(field)
+    return function(tbl) return tbl[field] end
+end
+function util.lt(ref)
+    return function(val) return val < ref end
+end
+function util.compose(f,g)
+    return function(...) return f(g(...)) end
+end
+function util.extend (destination, ...)
+    for i = 1, select('#', ...) do
+        for k,v in pairs((select(i, ...))) do
+            destination[k] = v
+        end
+    end
+    return destination
+end
+function util.setify (t)
+    local set = {}
+    for i = 1, #t do
+        set[t[i]]=true
+    end
+    return set
+end
+function util.arrayify (...) return {...} end
+local
+function _checkstrhelper(s)
+    return s..""
+end
+function util.checkstring(s, func)
+    local success, str = pcall(_checkstrhelper, s)
+    if not success then 
+        if func == nil then func = "?" end
+        error("bad argument to '"
+            ..tostring(func)
+            .."' (string expected, got "
+            ..type(s)
+            ..")",
+        2)
+    end
+    return str
+end
+return util
 
 end
 end
 --=============================================================================
 do local _ENV = _ENV
 packages['compiler'] = function (...)
-local assert, error, pairs, rawset, select, setmetatable, tostring, type
-    = assert, error, pairs, rawset, select, setmetatable, tostring, type
+local assert, error, pairs, print, rawset, select, setmetatable, tostring, type
+    = assert, error, pairs, print, rawset, select, setmetatable, tostring, type
 local s, t, u = require"string", require"table", require"util"
 local _ENV = u.noglobals() ----------------------------------------------------
 local s_byte, s_sub, t_concat, t_insert, t_remove, t_unpack
@@ -424,10 +798,17 @@ local choice_tpl = [=[
                 return true, si, ci
             else
             end]=]
+local function flatten(kind, pt, ccache)
+    if pt[2].pkind == kind then
+        return compile(pt[1], ccache), flatten(kind, pt[2], ccache)
+    else
+        return compile(pt[1], ccache), compile(pt[2], ccache)
+    end
+end
 compilers["choice"] = function (pt, ccache)
-    local choices, n = map(pt.aux, compile, ccache), #pt.aux
+    local choices = {flatten("choice", pt, ccache)}
     local names, chunks = {}, {}
-    for i = 1, n do
+    for i = 1, #choices do
         local m = "ch"..i
         names[#names + 1] = m
         chunks[ #names  ] = choice_tpl:gsub("XXXX", m)
@@ -451,9 +832,9 @@ local sequence_tpl = [=[
                 return false, ref_si, ref_ci
             end]=]
 compilers["sequence"] = function (pt, ccache)
-    local sequence, n = map(pt.aux, compile, ccache), #pt.aux
+    local sequence = {flatten("sequence", pt, ccache)}
     local names, chunks = {}, {}
-    for i = 1, n do
+    for i = 1, #sequence do
         local m = "seq"..i
         names[#names + 1] = m
         chunks[ #names  ] = sequence_tpl:gsub("XXXX", m)
@@ -782,6 +1163,205 @@ end
 end
 --=============================================================================
 do local _ENV = _ENV
+packages['re'] = function (...)
+
+return function(Builder, LL)
+local tonumber, type, print, error = tonumber, type, print, error
+local setmetatable = setmetatable
+local m = LL
+local mm = m
+local mt = getmetatable(mm.P(0))
+local version = _VERSION
+if version == "Lua 5.2" then _ENV = nil end
+local any = m.P(1)
+local Predef = { nl = m.P"\n" }
+local mem
+local fmem
+local gmem
+local function updatelocale ()
+  mm.locale(Predef)
+  Predef.a = Predef.alpha
+  Predef.c = Predef.cntrl
+  Predef.d = Predef.digit
+  Predef.g = Predef.graph
+  Predef.l = Predef.lower
+  Predef.p = Predef.punct
+  Predef.s = Predef.space
+  Predef.u = Predef.upper
+  Predef.w = Predef.alnum
+  Predef.x = Predef.xdigit
+  Predef.A = any - Predef.a
+  Predef.C = any - Predef.c
+  Predef.D = any - Predef.d
+  Predef.G = any - Predef.g
+  Predef.L = any - Predef.l
+  Predef.P = any - Predef.p
+  Predef.S = any - Predef.s
+  Predef.U = any - Predef.u
+  Predef.W = any - Predef.w
+  Predef.X = any - Predef.x
+  mem = {}    -- restart memoization
+  fmem = {}
+  gmem = {}
+  local mt = {__mode = "v"}
+  setmetatable(mem, mt)
+  setmetatable(fmem, mt)
+  setmetatable(gmem, mt)
+end
+updatelocale()
+local function getdef (id, defs)
+  local c = defs and defs[id]
+  if not c then error("undefined name: " .. id) end
+  return c
+end
+local function patt_error (s, i)
+  local msg = (#s < i + 20) and s:sub(i)
+                             or s:sub(i,i+20) .. "..."
+  msg = ("pattern error near '%s'"):format(msg)
+  error(msg, 2)
+end
+local function mult (p, n)
+  local np = mm.P(true)
+  while n >= 1 do
+    if n%2 >= 1 then np = np * p end
+    p = p * p
+    n = n/2
+  end
+  return np
+end
+local function equalcap (s, i, c)
+  if type(c) ~= "string" then return nil end
+  local e = #c + i
+  if s:sub(i, e - 1) == c then return e else return nil end
+end
+local S = (Predef.space + "--" * (any - Predef.nl)^0)^0
+local name = m.R("AZ", "az", "__") * m.R("AZ", "az", "__", "09")^0
+local arrow = S * "<-"
+local seq_follow = m.P"/" + ")" + "}" + ":}" + "~}" + "|}" + (name * arrow) + -1
+name = m.C(name)
+local Def = name * m.Carg(1)
+local num = m.C(m.R"09"^1) * S / tonumber
+local String = "'" * m.C((any - "'")^0) * "'" +
+               '"' * m.C((any - '"')^0) * '"'
+local defined = "%" * Def / function (c,Defs)
+  local cat =  Defs and Defs[c] or Predef[c]
+  if not cat then error ("name '" .. c .. "' undefined") end
+  return cat
+end
+local Range = m.Cs(any * (m.P"-"/"") * (any - "]")) / mm.R
+local item = defined + Range + m.C(any)
+local Class =
+    "["
+  * (m.C(m.P"^"^-1))    -- optional complement symbol
+  * m.Cf(item * (item - "]")^0, mt.__add) /
+                          function (c, p) return c == "^" and any - p or p end
+  * "]"
+local function adddef (t, k, exp)
+  if t[k] then
+    error("'"..k.."' already defined as a rule")
+  else
+    t[k] = exp
+  end
+  return t
+end
+local function firstdef (n, r) return adddef({n}, n, r) end
+local function NT (n, b)
+  if not b then
+    error("rule '"..n.."' used outside a grammar")
+  else return mm.V(n)
+  end
+end
+local exp = m.P{ "Exp",
+  Exp = S * ( m.V"Grammar"
+            + m.Cf(m.V"Seq" * ("/" * S * m.V"Seq")^0, mt.__add) );
+  Seq = m.Cf(m.Cc(m.P"") * m.V"Prefix"^0 , mt.__mul)
+        * (m.L(seq_follow) + patt_error);
+  Prefix = "&" * S * m.V"Prefix" / mt.__len
+         + "!" * S * m.V"Prefix" / mt.__unm
+         + m.V"Suffix";
+  Suffix = m.Cf(m.V"Primary" * S *
+          ( ( m.P"+" * m.Cc(1, mt.__pow)
+            + m.P"*" * m.Cc(0, mt.__pow)
+            + m.P"?" * m.Cc(-1, mt.__pow)
+            + "^" * ( m.Cg(num * m.Cc(mult))
+                    + m.Cg(m.C(m.S"+-" * m.R"09"^1) * m.Cc(mt.__pow))
+                    )
+            + "->" * S * ( m.Cg((String + num) * m.Cc(mt.__div))
+                         + m.P"{}" * m.Cc(nil, m.Ct)
+                         + m.Cg(Def / getdef * m.Cc(mt.__div))
+                         )
+            + "=>" * S * m.Cg(Def / getdef * m.Cc(m.Cmt))
+            ) * S
+          )^0, function (a,b,f) return f(a,b) end );
+  Primary = "(" * m.V"Exp" * ")"
+            + String / mm.P
+            + Class
+            + defined
+            + "{:" * (name * ":" + m.Cc(nil)) * m.V"Exp" * ":}" /
+                     function (n, p) return mm.Cg(p, n) end
+            + "=" * name / function (n) return mm.Cmt(mm.Cb(n), equalcap) end
+            + m.P"{}" / mm.Cp
+            + "{~" * m.V"Exp" * "~}" / mm.Cs
+            + "{|" * m.V"Exp" * "|}" / mm.Ct
+            + "{" * m.V"Exp" * "}" / mm.C
+            + m.P"." * m.Cc(any)
+            + (name * -arrow + "<" * name * ">") * m.Cb("G") / NT;
+  Definition = name * arrow * m.V"Exp";
+  Grammar = m.Cg(m.Cc(true), "G") *
+            m.Cf(m.V"Definition" / firstdef * m.Cg(m.V"Definition")^0,
+              adddef) / mm.P
+}
+local pattern = S * m.Cg(m.Cc(false), "G") * exp / mm.P * (-any + patt_error)
+local function compile (p, defs)
+  if mm.type(p) == "pattern" then return p end   -- already compiled
+  local cp = pattern:match(p, 1, defs)
+  if not cp then error("incorrect pattern", 3) end
+  return cp
+end
+local function match (s, p, i)
+  local cp = mem[p]
+  if not cp then
+    cp = compile(p)
+    mem[p] = cp
+  end
+  return cp:match(s, i or 1)
+end
+local function find (s, p, i)
+  local cp = fmem[p]
+  if not cp then
+    cp = compile(p) / 0
+    cp = mm.P{ mm.Cp() * cp * mm.Cp() + 1 * mm.V(1) }
+    fmem[p] = cp
+  end
+  local i, e = cp:match(s, i or 1)
+  if i then return i, e - 1
+  else return i
+  end
+end
+local function gsub (s, p, rep)
+  local g = gmem[p] or {}   -- ensure gmem[p] is not collected while here
+  gmem[p] = g
+  local cp = g[rep]
+  if not cp then
+    cp = compile(p)
+    cp = mm.Cs((cp / rep + 1)^0)
+    g[rep] = cp
+  end
+  return cp:match(s)
+end
+local re = {
+  compile = compile,
+  match = match,
+  find = find,
+  gsub = gsub,
+  updatelocale = updatelocale,
+}
+return re
+end
+end
+end
+--=============================================================================
+do local _ENV = _ENV
 packages['charsets'] = function (...)
 
 local s, t, u = require"string", require"table", require"util"
@@ -1019,205 +1599,6 @@ return function (Builder)
     end
 end
 
-end
-end
---=============================================================================
-do local _ENV = _ENV
-packages['re'] = function (...)
-
-return function(Builder, LL)
-local tonumber, type, print, error = tonumber, type, print, error
-local setmetatable = setmetatable
-local m = LL
-local mm = m
-local mt = getmetatable(mm.P(0))
-local version = _VERSION
-if version == "Lua 5.2" then _ENV = nil end
-local any = m.P(1)
-local Predef = { nl = m.P"\n" }
-local mem
-local fmem
-local gmem
-local function updatelocale ()
-  mm.locale(Predef)
-  Predef.a = Predef.alpha
-  Predef.c = Predef.cntrl
-  Predef.d = Predef.digit
-  Predef.g = Predef.graph
-  Predef.l = Predef.lower
-  Predef.p = Predef.punct
-  Predef.s = Predef.space
-  Predef.u = Predef.upper
-  Predef.w = Predef.alnum
-  Predef.x = Predef.xdigit
-  Predef.A = any - Predef.a
-  Predef.C = any - Predef.c
-  Predef.D = any - Predef.d
-  Predef.G = any - Predef.g
-  Predef.L = any - Predef.l
-  Predef.P = any - Predef.p
-  Predef.S = any - Predef.s
-  Predef.U = any - Predef.u
-  Predef.W = any - Predef.w
-  Predef.X = any - Predef.x
-  mem = {}    -- restart memoization
-  fmem = {}
-  gmem = {}
-  local mt = {__mode = "v"}
-  setmetatable(mem, mt)
-  setmetatable(fmem, mt)
-  setmetatable(gmem, mt)
-end
-updatelocale()
-local function getdef (id, defs)
-  local c = defs and defs[id]
-  if not c then error("undefined name: " .. id) end
-  return c
-end
-local function patt_error (s, i)
-  local msg = (#s < i + 20) and s:sub(i)
-                             or s:sub(i,i+20) .. "..."
-  msg = ("pattern error near '%s'"):format(msg)
-  error(msg, 2)
-end
-local function mult (p, n)
-  local np = mm.P(true)
-  while n >= 1 do
-    if n%2 >= 1 then np = np * p end
-    p = p * p
-    n = n/2
-  end
-  return np
-end
-local function equalcap (s, i, c)
-  if type(c) ~= "string" then return nil end
-  local e = #c + i
-  if s:sub(i, e - 1) == c then return e else return nil end
-end
-local S = (Predef.space + "--" * (any - Predef.nl)^0)^0
-local name = m.R("AZ", "az", "__") * m.R("AZ", "az", "__", "09")^0
-local arrow = S * "<-"
-local seq_follow = m.P"/" + ")" + "}" + ":}" + "~}" + "|}" + (name * arrow) + -1
-name = m.C(name)
-local Def = name * m.Carg(1)
-local num = m.C(m.R"09"^1) * S / tonumber
-local String = "'" * m.C((any - "'")^0) * "'" +
-               '"' * m.C((any - '"')^0) * '"'
-local defined = "%" * Def / function (c,Defs)
-  local cat =  Defs and Defs[c] or Predef[c]
-  if not cat then error ("name '" .. c .. "' undefined") end
-  return cat
-end
-local Range = m.Cs(any * (m.P"-"/"") * (any - "]")) / mm.R
-local item = defined + Range + m.C(any)
-local Class =
-    "["
-  * (m.C(m.P"^"^-1))    -- optional complement symbol
-  * m.Cf(item * (item - "]")^0, mt.__add) /
-                          function (c, p) return c == "^" and any - p or p end
-  * "]"
-local function adddef (t, k, exp)
-  if t[k] then
-    error("'"..k.."' already defined as a rule")
-  else
-    t[k] = exp
-  end
-  return t
-end
-local function firstdef (n, r) return adddef({n}, n, r) end
-local function NT (n, b)
-  if not b then
-    error("rule '"..n.."' used outside a grammar")
-  else return mm.V(n)
-  end
-end
-local exp = m.P{ "Exp",
-  Exp = S * ( m.V"Grammar"
-            + m.Cf(m.V"Seq" * ("/" * S * m.V"Seq")^0, mt.__add) );
-  Seq = m.Cf(m.Cc(m.P"") * m.V"Prefix"^0 , mt.__mul)
-        * (m.L(seq_follow) + patt_error);
-  Prefix = "&" * S * m.V"Prefix" / mt.__len
-         + "!" * S * m.V"Prefix" / mt.__unm
-         + m.V"Suffix";
-  Suffix = m.Cf(m.V"Primary" * S *
-          ( ( m.P"+" * m.Cc(1, mt.__pow)
-            + m.P"*" * m.Cc(0, mt.__pow)
-            + m.P"?" * m.Cc(-1, mt.__pow)
-            + "^" * ( m.Cg(num * m.Cc(mult))
-                    + m.Cg(m.C(m.S"+-" * m.R"09"^1) * m.Cc(mt.__pow))
-                    )
-            + "->" * S * ( m.Cg((String + num) * m.Cc(mt.__div))
-                         + m.P"{}" * m.Cc(nil, m.Ct)
-                         + m.Cg(Def / getdef * m.Cc(mt.__div))
-                         )
-            + "=>" * S * m.Cg(Def / getdef * m.Cc(m.Cmt))
-            ) * S
-          )^0, function (a,b,f) return f(a,b) end );
-  Primary = "(" * m.V"Exp" * ")"
-            + String / mm.P
-            + Class
-            + defined
-            + "{:" * (name * ":" + m.Cc(nil)) * m.V"Exp" * ":}" /
-                     function (n, p) return mm.Cg(p, n) end
-            + "=" * name / function (n) return mm.Cmt(mm.Cb(n), equalcap) end
-            + m.P"{}" / mm.Cp
-            + "{~" * m.V"Exp" * "~}" / mm.Cs
-            + "{|" * m.V"Exp" * "|}" / mm.Ct
-            + "{" * m.V"Exp" * "}" / mm.C
-            + m.P"." * m.Cc(any)
-            + (name * -arrow + "<" * name * ">") * m.Cb("G") / NT;
-  Definition = name * arrow * m.V"Exp";
-  Grammar = m.Cg(m.Cc(true), "G") *
-            m.Cf(m.V"Definition" / firstdef * m.Cg(m.V"Definition")^0,
-              adddef) / mm.P
-}
-local pattern = S * m.Cg(m.Cc(false), "G") * exp / mm.P * (-any + patt_error)
-local function compile (p, defs)
-  if mm.type(p) == "pattern" then return p end   -- already compiled
-  local cp = pattern:match(p, 1, defs)
-  if not cp then error("incorrect pattern", 3) end
-  return cp
-end
-local function match (s, p, i)
-  local cp = mem[p]
-  if not cp then
-    cp = compile(p)
-    mem[p] = cp
-  end
-  return cp:match(s, i or 1)
-end
-local function find (s, p, i)
-  local cp = fmem[p]
-  if not cp then
-    cp = compile(p) / 0
-    cp = mm.P{ mm.Cp() * cp * mm.Cp() + 1 * mm.V(1) }
-    fmem[p] = cp
-  end
-  local i, e = cp:match(s, i or 1)
-  if i then return i, e - 1
-  else return i
-  end
-end
-local function gsub (s, p, rep)
-  local g = gmem[p] or {}   -- ensure gmem[p] is not collected while here
-  gmem[p] = g
-  local cp = g[rep]
-  if not cp then
-    cp = compile(p)
-    cp = mm.Cs((cp / rep + 1)^0)
-    g[rep] = cp
-  end
-  return cp:match(s)
-end
-local re = {
-  compile = compile,
-  match = match,
-  find = find,
-  gsub = gsub,
-  updatelocale = updatelocale,
-}
-return re
-end
 end
 end
 --=============================================================================
@@ -1513,6 +1894,13 @@ local escape_index = {
     ["\v"] = "\\v",
     ["\127"] = "\\ESC"
 }
+local function flatten(kind, list)
+    if list[2].pkind == kind then
+        return list[1], flatten(kind, list[2])
+    else
+        return list[1], list[2]
+    end
+end
 for i = 0, 8 do escape_index[s_char(i)] = "\\"..i end
 for i = 14, 31 do escape_index[s_char(i)] = "\\"..i end
 local
@@ -1575,38 +1963,39 @@ for k, v in pairs{
     lookahead  = [[LL_pprint(pt.pattern, offset, "# ")]],
     choice = [[
         print(offset..prefix.."+")
-        map(pt.aux, LL_pprint, offset.." :", "")
+        local ch, i = {}, 1
+        while pt.pkind == "choice" do
+            ch[i], pt, i = pt[1], pt[2], i + 1
+        end
+        ch[i] = pt
+        map(ch, LL_pprint, offset.." :", "")
         ]],
     sequence = [=[
-        if u.all(pt.aux, function(p) return p.pkind == "char" end) then
-            local acc = {}
-            for i = 1, #(pt.aux) do
-                acc[i] = pt.aux[i].aux
-            end
-            print(offset..prefix..'"'..s.char(u.unpack(acc))..'"')
-        else
-            local xformed = u.fold(pt.aux, function(acc, p)
-                local n = #acc
-                if n == 0 then
-                    acc[1] = p
-                elseif p.pkind == "char" and acc[n].pkind == "char"
-                    then acc[n] = {buffer = true, acc[n].aux, p.aux}
-                elseif p.pkind == "char" and acc[n].buffer then
-                    acc[n][#acc[n]+1] = p.aux
-                elseif acc[n].buffer and p.pkind ~= "char" then
-                    acc[n].pkind = "string"
-                    acc[n].as_is = s.char(u.unpack(acc[n]))
+        print(offset..prefix.."*")
+        local acc, p2 = {}
+        offset = offset .. " |"
+        while true do
+            if pt.pkind ~= "sequence" then -- last element
+                if pt.pkind == "char" then
+                    acc[#acc + 1] = pt.aux
+                    print(offset..'P( "'..s.char(u.unpack(acc))..'" )')
                 else
-                    acc[n+1] = p
+                    if #acc ~= 0 then
+                        print(offset..'P( "'..s.char(u.unpack(acc))..'" )')
+                    end
+                    LL_pprint(pt, offset, "")
                 end
-                return acc
-            end, {})
-            if xformed[#xformed].buffer then
-                xformed[#xformed].pkind = "string"
-                xformed[#xformed].as_is = s.char(u.unpack(xformed[#xformed]))
+                break
+            elseif pt[1].pkind == "char" then
+                acc[#acc + 1] = pt[1].aux
+            elseif #acc ~= 0 then
+                print(offset..'P( "'..s.char(u.unpack(acc))..'" )')
+                acc = {}
+                LL_pprint(pt[1], offset, "")
+            else
+                LL_pprint(pt[1], offset, "")
             end
-            print(offset..prefix.."*")
-            map(xformed, LL_pprint, offset.." |", "")
+            pt = pt[2]
         end
         ]=],
     grammar   = [[
@@ -1620,11 +2009,11 @@ for k, v in pairs{
     ]]
 } do
     printers[k] = load(([[
-        local map, LL_pprint, pkind, s, u = ...
+        local map, LL_pprint, pkind, s, u, flatten = ...
         return function (pt, offset, prefix)
             XXXX
         end
-    ]]):gsub("XXXX", v), k.." printer")(map, LL_pprint, type, s, u)
+    ]]):gsub("XXXX", v), k.." printer")(map, LL_pprint, type, s, u, flatten)
 end
 for _, cap in pairs{"C", "Cs", "Ct"} do
     printers[cap] = function (pt, offset, prefix)
@@ -1721,32 +2110,51 @@ end
 end
 --=============================================================================
 do local _ENV = _ENV
-packages['compat'] = function (...)
+packages['analizer'] = function (...)
 
-local _, debug, jit
-_, debug = pcall(require, "debug")
-_, jit = pcall(require, "jit")
-jit = _ and jit
-local compat = {
-    debug = debug,
-    lua51 = (_VERSION == "Lua 5.1") and not jit,
-    lua52 = _VERSION == "Lua 5.2",
-    luajit = jit and true or false,
-    jit = jit and jit.status(),
-    lua52_len = not #setmetatable({},{__len = function()end}),
-    proxies = pcall(function()
-        local prox = newproxy(true)
-        local prox2 = newproxy(prox)
-        assert (type(getmetatable(prox)) == "table" 
-                and (getmetatable(prox)) == (getmetatable(prox2)))
-    end)
+local u = require"util"
+local nop, weakkey = u.nop, u.weakkey
+local hasVcache, hasCmtcache , lengthcache
+    = weakkey{}, weakkey{},    weakkey{}
+return {
+    hasV = nop,
+    hasCmt = nop,
+    length = nop,
+    hasCapture = nop
 }
-if compat.lua52 then
-    compat._goto = true
-else
-    compat._goto = loadstring"::R::" and true or false
+
 end
-return compat
+end
+--=============================================================================
+do local _ENV = _ENV
+packages['locale'] = function (...)
+
+local extend = require"util".extend
+local _ENV = require"util".noglobals() ----------------------------------------
+return function(Builder, LL) -- Module wrapper {-------------------------------
+local R, S = LL.R, LL.S
+local locale = {}
+locale["cntrl"] = R"\0\31" + "\127"
+locale["digit"] = R"09"
+locale["lower"] = R"az"
+locale["print"] = R" ~" -- 0x20 to 0xee
+locale["space"] = S" \f\n\r\t\v" -- \f == form feed (for a printer), \v == vtab
+locale["upper"] = R"AZ"
+locale["alpha"]  = locale["lower"] + locale["upper"]
+locale["alnum"]  = locale["alpha"] + locale["digit"]
+locale["graph"]  = locale["print"] - locale["space"]
+locale["punct"]  = locale["graph"] - locale["alnum"]
+locale["xdigit"] = locale["digit"] + R"af" + R"AF"
+function LL.locale (t)
+    return extend(t or {}, locale)
+end
+end -- Module wrapper --------------------------------------------------------}
+
+end
+end
+--=============================================================================
+do local _ENV = _ENV
+packages['match'] = function (...)
 
 end
 end
@@ -1756,61 +2164,48 @@ packages['factorizer'] = function (...)
 local ipairs, pairs, print, setmetatable
     = ipairs, pairs, print, setmetatable
 local u = require"util"
-local   id,   setify,   arrayify
-    = u.id, u.setify, u.arrayify
-local V_hasCmt = u.nop
+local   id,   nop,   setify,   weakkey
+    = u.id, u.nop, u.setify, u.weakkey
 local _ENV = u.noglobals() ----------------------------------------------------
 local
-function process_booleans(lst, opts)
-    local acc, id, brk = {}, opts.id, opts.brk
-    for i = 1,#lst do
-        local p = lst[i]
-        if p ~= id then
-            acc[#acc + 1] = p
-        end
-        if p == brk then
-            break
-        end
-    end
-    return acc
+function process_booleans(a, b, opts)
+    local id, brk = opts.id, opts.brk
+    if a == id then return true, b
+    elseif b == id then return true, a
+    elseif a == brk then return true, brk
+    else return false end
 end
 local unary = setify{
-    "C", "Cf", "Cg", "Cs", "Ct", "/zero",
-    "Clb", "Cmt", "div_string", "div_number",
-    "div_table", "div_function", "at least", "at most"
+    "unm", "lookahead", "C", "Cf",
+    "Cg", "Cs", "Ct", "/zero"
+}
+local unary_aux = setify{
+    "behind", "at least", "at most", "Clb", "Cmt",
+    "div_string", "div_number", "div_table", "div_function"
 }
 local unifiable = setify{"char", "set", "range"}
-local
-function mergeseqhead (p1, p2)
-    local n, len = 0, m_min(#p1, p2)
-    while n <= len do
-        if pi[n + 1] == p2[n + 1] then n = n + 1
-        else break end
+local hasCmt; hasCmt = setmetatable({}, {__mode = "k", __index = function(self, pt)
+    local kind, res = pt.pkind, false
+    if kind == "Cmt"
+    or kind == "ref"
+    then
+        res = true
+    elseif unary[kind] or unary_aux[kind] then
+        res = hasCmt[pt.pattern]
+    elseif kind == "choice" or kind == "sequence" then
+        res = hasCmt[pt[1]] or hasCmt[pt[2]]
     end
-end
+    hasCmt[pt] = res
+    return res
+end})
 return function (Builder, LL) --------------------------------------------------
 if Builder.options.factorize == false then
-    print"No factorization"
     return {
-        choice = arrayify,
-        sequence = arrayify,
-        lookahead = id,
-        unm = id
+        choice = nop,
+        sequence = nop,
+        lookahead = nop,
+        unm = nop
     }
-end
-local -- flattens a choice/sequence (a * b) * (c * d) => a * b * c * d
-function flatten(typ, ary)
-    local acc = {}
-    for _, p in ipairs(ary) do
-        if p.pkind == typ then
-            for _, q in ipairs(p.aux) do
-                acc[#acc+1] = q
-            end
-        else
-            acc[#acc+1] = p
-        end
-    end
-    return acc
 end
 local constructors, LL_P =  Builder.constructors, LL.P
 local truept, falsept
@@ -1832,95 +2227,65 @@ local type2cons = {
     ["Clb"] = "Cg",
 }
 local
-function choice (a,b, ...)
-    local dest
-    if b ~= nil then
-        dest = flatten("choice", {a,b,...})
-    else
-        dest = flatten("choice", a)
+function choice (a, b)
+    do  -- handle the identity/break properties of true and false.
+        local hasbool, res = process_booleans(a, b, { id = falsept, brk = truept })
+        if hasbool then return res end
     end
-    dest = process_booleans(dest, { id = falsept, brk = truept })
-    local changed
-    local src
-    repeat
-        src, dest, changed = dest, {dest[1]}, false
-        for i = 2,#src do
-            local p1, p2 = dest[#dest], src[i]
-            local type1, type2 = p1.pkind, p2.pkind
-            if mergeable[type1] and mergeable[type2] then
-                dest[#dest] = constructors.aux("set", S_union(p1.aux, p2.aux))
-                changed = true
-            elseif mergeable[type1] and type2 == "any" and p2.aux == 1
-            or     mergeable[type2] and type1 == "any" and p1.aux == 1 then
-                dest[#dest] = type1 == "any" and p1 or p2
-                changed = true
-            elseif type1 == type2 then
-                if unary[type1] and ( p1.aux == p2.aux ) then
-                    dest[#dest] = LL[type2cons[type1] or type1](p1.pattern + p2.pattern, p1.aux)
-                    changed = true
-                elseif p1 == p2 then
-                    changed = true
-                else
-                    dest[#dest + 1] = p2
-                end
-            else
-                dest[#dest + 1] = p2
-            end -- if identical and without Cmt, fold them into one.
+    local ka, kb = a.pkind, b.pkind
+    if a == b and not hasCmt[a] then
+        return a
+    elseif ka == "choice" then -- correct associativity without blowing up the stack
+        local acc, i = {}, 1
+        while a.pkind == "choice" do
+            acc[i], a, i = a[1], a[2], i + 1
         end
-    until not changed
-    return dest
+        acc[i] = a
+        for j = i, 1, -1 do
+            b = acc[j] + b
+        end
+        return b
+    elseif mergeable[ka] and mergeable[kb] then
+        return constructors.aux("set", S_union(a.aux, b.aux))
+    elseif mergeable[ka] and kb == "any" and b.aux == 1
+    or     mergeable[kb] and ka == "any" and a.aux == 1 then
+        return ka == "any" and a or b
+    elseif ka == kb then
+        if (unary[ka] or unary_aux[ka]) and ( a.aux == b.aux ) then
+            return LL[type2cons[ka] or ka](a.pattern + b.pattern, a.aux)
+        elseif ( ka == kb ) and ka == "sequence" then
+            if a[1] == b[1]  and not hasCmt[a[1]] then
+                return a[1] * (a[2] + b[2])
+            end
+        end
+    end
+    return false
 end
 local
 function lookahead (pt)
     return pt
 end
 local
-function append (acc, p1, p2)
-    acc[#acc + 1] = p2
-end
-local
-function seq_any_any (acc, p1, p2)
-    acc[#acc] = LL_P(p1.aux + p2.aux)
-end
-local seq_optimize = {
-    any = {
-        any = seq_any_any,
-        one = seq_any_any
-    },
-    one = {
-        any = seq_any_any,
-        one = seq_any_any
-    },
-    unm = {
-        unm = append -- seq_unm_unm
-    }
-}
-local metaappend_mt = {
-    __index = function()return append end
-}
-for _, v in pairs(seq_optimize) do
-    setmetatable(v, metaappend_mt)
-end
-local metaappend = setmetatable({}, metaappend_mt)
-setmetatable(seq_optimize, {
-    __index = function() return metaappend end
-})
-local
-function sequence(a, b, ...)
-    local seq1
-    if b ~=nil then
-        seq1 = flatten("sequence", {a, b, ...})
-    else
-        seq1 = flatten("sequence", a)
+function sequence(a, b)
+    do
+        local hasbool, res = process_booleans(a, b, { id = truept, brk = falsept })
+        if hasbool then return res end
     end
-    seq1 = process_booleans(seq1, { id = truept, brk = falsept })
-    local seq2 = {}
-    seq2[1] = seq1[1]
-    for i = 2,#seq1 do
-        local p1, p2 = seq2[#seq2], seq1[i]
-        seq_optimize[p1.pkind][p2.pkind](seq2, p1, p2)
+    local ka, kb = a.pkind, b.pkind
+    if ka == "sequence" then -- correct associativity without blowing up the stack
+        local acc, i = {}, 1
+        while a.pkind == "sequence" do
+            acc[i], a, i = a[1], a[2], i + 1
+        end
+        acc[i] = a
+        for j = i, 1, -1 do
+            b = acc[j] * b
+        end
+        return b
+    elseif (ka == "one" or ka == "any") and (kb == "one" or kb == "any") then
+        return LL_P(a.aux + b.aux)
     end
-    return seq2
+    return false
 end
 local
 function unm (pt)
@@ -1942,388 +2307,17 @@ end
 end
 --=============================================================================
 do local _ENV = _ENV
-packages['match'] = function (...)
-
-end
-end
---=============================================================================
-do local _ENV = _ENV
-packages['util'] = function (...)
-
-local getmetatable, setmetatable, load, loadstring, next
-    , pairs, pcall, print, rawget, rawset, select, tostring
-    , type, unpack
-    = getmetatable, setmetatable, load, loadstring, next
-    , pairs, pcall, print, rawget, rawset, select, tostring
-    , type, unpack
-local m, s, t = require"math", require"string", require"table"
-local m_max, s_match, s_gsub, t_concat, t_insert
-    = m.max, s.match, s.gsub, t.concat, t.insert
-local compat = require"compat"
-local
-function nop () end
-local noglobals, getglobal, setglobal if pcall and not compat.lua52 and not release then
-    local function errR (_,i)
-        error("illegal global read: " .. tostring(i), 2)
-    end
-    local function errW (_,i, v)
-        error("illegal global write: " .. tostring(i)..": "..tostring(v), 2)
-    end
-    local env = setmetatable({}, { __index=errR, __newindex=errW })
-    noglobals = function()
-        pcall(setfenv, 3, env)
-    end
-    function getglobal(k) rawget(env, k) end
-    function setglobal(k, v) rawset(env, k, v) end
-else
-    noglobals = nop
-end
-local _ENV = noglobals() ------------------------------------------------------
-local util = {
-    nop = nop,
-    noglobals = noglobals,
-    getglobal = getglobal,
-    setglobal = setglobal
-}
-util.unpack = t.unpack or unpack
-util.pack = t.pack or function(...) return { n = select('#', ...), ... } end
-if compat.lua51 then
-    local old_load = load
-   function util.load (ld, source, mode, env)
-     local fun
-     if type (ld) == 'string' then
-       fun = loadstring (ld)
-     else
-       fun = old_load (ld, source)
-     end
-     if env then
-       setfenv (fun, env)
-     end
-     return fun
-   end
-else
-    util.load = load
-end
-if compat.luajit and compat.jit then
-    function util.max (ary)
-        local max = 0
-        for i = 1, #ary do
-            max = m_max(max,ary[i])
-        end
-        return max
-    end
-elseif compat.luajit then
-    local t_unpack = util.unpack
-    function util.max (ary)
-     local len = #ary
-        if len <=30 or len > 10240 then
-            local max = 0
-            for i = 1, #ary do
-                local j = ary[i]
-                if j > max then max = j end
-            end
-            return max
-        else
-            return m_max(t_unpack(ary))
-        end
-    end
-else
-    local t_unpack = util.unpack
-    local safe_len = 1000
-    function util.max(array)
-        local len = #array
-        if len == 0 then return -1 end -- FIXME: shouldn't this be `return -1`?
-        local off = 1
-        local off_end = safe_len
-        local max = array[1] -- seed max.
-        repeat
-            if off_end > len then off_end = len end
-            local seg_max = m_max(t_unpack(array, off, off_end))
-            if seg_max > max then
-                max = seg_max
-            end
-            off = off + safe_len
-            off_end = off_end + safe_len
-        until off >= len
-        return max
-    end
-end
-local
-function setmode(t,mode)
-    local mt = getmetatable(t) or {}
-    if mt.__mode then
-        error("The mode has already been set on table "..tostring(t)..".")
-    end
-    mt.__mode = mode
-    return setmetatable(t, mt)
-end
-util.setmode = setmode
-function util.weakboth (t)
-    return setmode(t,"kv")
-end
-function util.weakkey (t)
-    return setmode(t,"k")
-end
-function util.weakval (t)
-    return setmode(t,"v")
-end
-function util.strip_mt (t)
-    return setmetatable(t, nil)
-end
-local getuniqueid
-do
-    local N, index = 0, {}
-    function getuniqueid(v)
-        if not index[v] then
-            N = N + 1
-            index[v] = N
-        end
-        return index[v]
-    end
-end
-util.getuniqueid = getuniqueid
-do
-    local counter = 0
-    function util.gensym ()
-        counter = counter + 1
-        return "___SYM_"..counter
-    end
-end
-function util.passprint (...) print(...) return ... end
-local val_to_str_, key_to_str, table_tostring, cdata_to_str, t_cache
-local multiplier = 2
-local
-function val_to_string (v, indent)
-    indent = indent or 0
-    t_cache = {} -- upvalue.
-    local acc = {}
-    val_to_str_(v, acc, indent, indent)
-    local res = t_concat(acc, "")
-    return res
-end
-util.val_to_str = val_to_string
-function val_to_str_ ( v, acc, indent, str_indent )
-    str_indent = str_indent or 1
-    if "string" == type( v ) then
-        v = s_gsub( v, "\n",  "\n" .. (" "):rep( indent * multiplier + str_indent ) )
-        if s_match( s_gsub( v,"[^'\"]",""), '^"+$' ) then
-            acc[#acc+1] = t_concat{ "'", "", v, "'" }
-        else
-            acc[#acc+1] = t_concat{'"', s_gsub(v,'"', '\\"' ), '"' }
-        end
-    elseif "cdata" == type( v ) then
-            cdata_to_str( v, acc, indent )
-    elseif "table" == type(v) then
-        if t_cache[v] then
-            acc[#acc+1] = t_cache[v]
-        else
-            t_cache[v] = tostring( v )
-            table_tostring( v, acc, indent )
-        end
-    else
-        acc[#acc+1] = tostring( v )
-    end
-end
-function key_to_str ( k, acc, indent )
-    if "string" == type( k ) and s_match( k, "^[_%a][_%a%d]*$" ) then
-        acc[#acc+1] = s_gsub( k, "\n", (" "):rep( indent * multiplier + 1 ) .. "\n" )
-    else
-        acc[#acc+1] = "[ "
-        val_to_str_( k, acc, indent )
-        acc[#acc+1] = " ]"
-    end
-end
-function cdata_to_str(v, acc, indent)
-    acc[#acc+1] = ( " " ):rep( indent * multiplier )
-    acc[#acc+1] = "["
-    print(#acc)
-    for i = 0, #v do
-        if i % 16 == 0 and i ~= 0 then
-            acc[#acc+1] = "\n"
-            acc[#acc+1] = (" "):rep(indent * multiplier + 2)
-        end
-        acc[#acc+1] = v[i] and 1 or 0
-        acc[#acc+1] = i ~= #v and  ", " or ""
-    end
-    print(#acc, acc[1], acc[2])
-    acc[#acc+1] = "]"
-end
-function table_tostring ( tbl, acc, indent )
-    acc[#acc+1] = t_cache[tbl]
-    acc[#acc+1] = "{\n"
-    for k, v in pairs( tbl ) do
-        local str_indent = 1
-        acc[#acc+1] = (" "):rep((indent + 1) * multiplier)
-        key_to_str( k, acc, indent + 1)
-        if acc[#acc] == " ]"
-        and acc[#acc - 2] == "[ "
-        then str_indent = 8 + #acc[#acc - 1]
-        end
-        acc[#acc+1] = " = "
-        val_to_str_( v, acc, indent + 1, str_indent)
-        acc[#acc+1] = "\n"
-    end
-    acc[#acc+1] = ( " " ):rep( indent * multiplier )
-    acc[#acc+1] = "}"
-end
-function util.expose(v) print(val_to_string(v)) return v end
-function util.map (ary, func, ...)
-    if type(ary) == "function" then ary, func = func, ary end
-    local res = {}
-    for i = 1,#ary do
-        res[i] = func(ary[i], ...)
-    end
-    return res
-end
-function util.selfmap (ary, func, ...)
-    if type(ary) == "function" then ary, func = func, ary end
-    for i = 1,#ary do
-        ary[i] = func(ary[i], ...)
-    end
-    return ary
-end
-local
-function map_all (tbl, func, ...)
-    if type(tbl) == "function" then tbl, func = func, tbl end
-    local res = {}
-    for k, v in next, tbl do
-        res[k]=func(v, ...)
-    end
-    return res
-end
-util.map_all = map_all
-local
-function fold (ary, func, acc)
-    local i0 = 1
-    if not acc then
-        acc = ary[1]
-        i0 = 2
-    end
-    for i = i0, #ary do
-        acc = func(acc,ary[i])
-    end
-    return acc
-end
-util.fold = fold
-local
-function map_fold(ary, mfunc, ffunc, acc)
-    local i0 = 1
-    if not acc then
-        acc = mfunc(ary[1])
-        i0 = 2
-    end
-    for i = i0, #ary do
-        acc = ffunc(acc,mfunc(ary[i]))
-    end
-    return acc
-end
-util.map_fold = map_fold
-function util.zip(a1, a2)
-    local res, len = {}, m_max(#a1,#a2)
-    for i = 1,len do
-        res[i] = {a1[i], a2[i]}
-    end
-    return res
-end
-function util.zip_all(t1, t2)
-    local res = {}
-    for k,v in pairs(t1) do
-        res[k] = {v, t2[k]}
-    end
-    for k,v in pairs(t2) do
-        if res[k] == nil then
-            res[k] = {t1[k], v}
-        end
-    end
-    return res
-end
-function util.filter(ary,func)
-    local res = {}
-    for i = 1,#ary do
-        if func(ary[i]) then
-            t_insert(res, ary[i])
-        end
-    end
-end
-local
-function id (...) return ... end
-util.id = id
-local function AND (a,b) return a and b end
-local function OR  (a,b) return a or b  end
-function util.copy (tbl) return map_all(tbl, id) end
-function util.all (ary, mfunc)
-    if mfunc then
-        return map_fold(ary, mfunc, AND)
-    else
-        return fold(ary, AND)
-    end
-end
-function util.any (ary, mfunc)
-    if mfunc then
-        return map_fold(ary, mfunc, OR)
-    else
-        return fold(ary, OR)
-    end
-end
-function util.get(field)
-    return function(tbl) return tbl[field] end
-end
-function util.lt(ref)
-    return function(val) return val < ref end
-end
-function util.compose(f,g)
-    return function(...) return f(g(...)) end
-end
-function util.extend (destination, ...)
-    for i = 1, select('#', ...) do
-        for k,v in pairs((select(i, ...))) do
-            destination[k] = v
-        end
-    end
-    return destination
-end
-function util.setify (t)
-    local set = {}
-    for i = 1, #t do
-        set[t[i]]=true
-    end
-    return set
-end
-function util.arrayify (...) return {...} end
-local
-function _checkstrhelper(s)
-    return s..""
-end
-function util.checkstring(s, func)
-    local success, str = pcall(_checkstrhelper, s)
-    if not success then 
-        if func == nil then func = "?" end
-        error("bad argument to '"
-            ..tostring(func)
-            .."' (string expected, got "
-            ..type(s)
-            ..")",
-        2)
-    end
-    return str
-end
-return util
-
-end
-end
---=============================================================================
-do local _ENV = _ENV
 packages['API'] = function (...)
 
 local assert, error, ipairs, pairs, pcall, print
-    , require, select, tonumber, type
+    , require, select, tonumber, tostring, type
     = assert, error, ipairs, pairs, pcall, print
-    , require, select, tonumber, type
+    , require, select, tonumber, tostring, type
 local t, u = require"table", require"util"
 local _ENV = u.noglobals() ---------------------------------------------------
 local t_concat = t.concat
-local   checkstring,   copy,   fold,   load,   map,   setify, t_pack, t_unpack
-    = u.checkstring, u.copy, u.fold, u.load, u.map, u.setify, u.pack, u.unpack
+local   checkstring,   copy,   fold,   load,   map_fold,   map_foldr,   setify, t_pack, t_unpack
+    = u.checkstring, u.copy, u.fold, u.load, u.map_fold, u.map_foldr, u.setify, u.pack, u.unpack
 local
 function charset_error(index, charset)
     error("Character at position ".. index + 1
@@ -2365,7 +2359,7 @@ function LL_P (...)
         end
         if v == "" then return truept end
         return 
-            Builder.sequence(map(makechar, split_int(v)))
+            map_foldr(split_int(v), makechar, Builder.sequence)
     elseif typ == "table" then
         local g = copy(v)
         if g[1] == nil then error("grammar has no initial rule") end
@@ -2443,9 +2437,11 @@ do
         elseif typ == "string" then return #pt.as_is
         elseif typ == "any" then return pt.aux
         elseif typ == "choice" then
-            return fold(map(pt.aux,fixedlen), function(a,b) return (a == b) and a end )
+            local l1, l2 = fixedlen(pt[1], gram, cycle), fixedlen(pt[2], gram, cycle)
+            return (l1 == l2) and l1
         elseif typ == "sequence" then
-            return fold(map(pt.aux, fixedlen), function(a,b) return a and b and a + b end)
+            local l1, l2 = fixedlen(pt[1], gram, cycle), fixedlen(pt[2], gram, cycle)
+            return l1 and l2 and l1 + l2
         elseif typ == "grammar" then
             if pt.aux[1].pkind == "ref" then
                 return fixedlen(pt.aux[pt.aux[1].aux], pt.aux, {})
@@ -2469,35 +2465,32 @@ do
             constructors.both("behind", pt, len)
     end
 end
-local
-function choice (a, b, ...)
-    if b ~= nil then
-        a, b = LL_P(a), LL_P(b)
-    end
-    local ch = factorize_choice(a, b, ...)
-    if #ch == 0 then
-        return falsept
-    elseif #ch == 1 then
-        return ch[1]
-    else
-        return
-            constructors.aux("choice", ch)
-    end
+local function nameify(a, b)
+    return tostring(a)..tostring(b)
 end
-function LL.__add (a,b)
+local
+function choice (a, b)
+    local name = tostring(a)..tostring(b)
+    local ch = Builder.ptcache.choice[name]
+    if not ch then
+        ch = factorize_choice(a, b) or constructors.binary("choice", a, b)
+        Builder.ptcache.choice[name] = ch
+    end
+    return ch
+end
+function LL.__add (a, b)
     return 
         choice(LL_P(a), LL_P(b))
 end
 local
-function sequence (a, b, ...)
-    local seq = factorize_sequence(a, b, ...)
-    if #seq == 0 then
-        return truept
-    elseif #seq == 1 then
-        return seq[1]
+function sequence (a, b)
+    local name = tostring(a)..tostring(b)
+    local seq = Builder.ptcache.sequence[name]
+    if not seq then
+        seq = factorize_sequence(a, b) or constructors.binary("sequence", a, b)
+        Builder.ptcache.sequence[name] = seq
     end
-    return
-        constructors.aux("sequence", seq)
+    return seq
 end
 Builder.sequence = sequence
 function LL.__mul (a, b)
@@ -2707,6 +2700,7 @@ local ptcache, meta
 local
 function resetcache()
     ptcache, meta = {}, weakkey{}
+    Builder.ptcache = ptcache
     for _, p in ipairs(patternwith.aux) do
         ptcache[p] = weakval{}
     end
@@ -2785,6 +2779,12 @@ constructors["both"] = function(typ, pt, aux)
     end
     return cache[pt]
 end
+constructors["binary"] = function(typ, a, b)
+    return newpattern{
+        a, b;
+        pkind = typ,
+    }
+end
 end -- module wrapper
 
 end
@@ -2852,28 +2852,28 @@ end
 end
 --=============================================================================
 do local _ENV = _ENV
-packages['locale'] = function (...)
+packages['compat'] = function (...)
 
-local extend = require"util".extend
-local _ENV = require"util".noglobals() ----------------------------------------
-return function(Builder, LL) -- Module wrapper {-------------------------------
-local R, S = LL.R, LL.S
-local locale = {}
-locale["cntrl"] = R"\0\31" + "\127"
-locale["digit"] = R"09"
-locale["lower"] = R"az"
-locale["print"] = R" ~" -- 0x20 to 0xee
-locale["space"] = S" \f\n\r\t\v" -- \f == form feed (for a printer), \v == vtab
-locale["upper"] = R"AZ"
-locale["alpha"]  = locale["lower"] + locale["upper"]
-locale["alnum"]  = locale["alpha"] + locale["digit"]
-locale["graph"]  = locale["print"] - locale["space"]
-locale["punct"]  = locale["graph"] - locale["alnum"]
-locale["xdigit"] = locale["digit"] + R"af" + R"AF"
-function LL.locale (t)
-    return extend(t or {}, locale)
-end
-end -- Module wrapper --------------------------------------------------------}
+local _, debug, jit
+_, debug = pcall(require, "debug")
+_, jit = pcall(require, "jit")
+jit = _ and jit
+local compat = {
+    debug = debug,
+    lua51 = (_VERSION == "Lua 5.1") and not jit,
+    lua52 = _VERSION == "Lua 5.2",
+    luajit = jit and true or false,
+    jit = jit and jit.status(),
+    lua52_len = not #setmetatable({},{__len = function()end}),
+    proxies = pcall(function()
+        local prox = newproxy(true)
+        local prox2 = newproxy(prox)
+        assert (type(getmetatable(prox)) == "table" 
+                and (getmetatable(prox)) == (getmetatable(prox2)))
+    end),
+    _goto = not not(loadstring or load)"::R::"
+}
+return compat
 
 end
 end
